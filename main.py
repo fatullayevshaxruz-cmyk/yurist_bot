@@ -1,3 +1,7 @@
+import os
+from aiohttp import web
+import asyncio
+
 """
 🚗 AI AVTO-YURIST BOT
 =======================
@@ -75,11 +79,29 @@ bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTM
 openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 router = Router()
 
+
+async def handle(request):
+    return web.Response(text="Bot is running!")
+async def start_webhook():
+    app = web.Application()
+    app.router.add_get("/", handle)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.environ.get("PORT", 8080))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    print(f"✅ Web server {port}-portda ishga tushdi")
+
+
 # ================= FSM STATES =================
 class PaymentStates(StatesGroup):
     """To'lov holatlari"""
     waiting_for_receipt = State()  # Chek kutilmoqda
 
+
+# 3. ENG OXIRIDA ESA DOIM SHU QOLADI
+if __name__ == "__main__":
+    asyncio.run(main())
 
 # ================= MA'LUMOTLAR BAZASI =================
 def init_db():
@@ -681,6 +703,13 @@ async def handle_photo(message: Message):
     """Umumiy rasm handler - to'lov cheki sifatida qabul qilish"""
     await process_receipt_photo(message)
 
+# 2. ASOSIY MAIN FUNKSIYASI
+async def main():
+    # SHU YERDA WEB SERVERNI ISHGA TUSHIRAMIZ
+    asyncio.create_task(start_webhook())
+    
+    print("🚀 Bot ishga tushdi!")
+    await dp.start_polling(bot)
 
 # ================= ASOSIY FUNKSIYA =================
 
