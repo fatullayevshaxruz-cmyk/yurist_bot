@@ -1,0 +1,22 @@
+# Maxfiy ma'lumotlar (Eng muhimi!)
+.env
+*.env
+token.txt
+
+# Python kutubxonalari va virtual muhit
+venv/
+env/
+ENV/
+.venv/
+__pycache__/
+*.py[cod]
+
+# MacBook uchun xos tizim fayllari
+.DS_Store
+
+# Ma'lumotlar bazasi (agar sqlite ishlatayotgan bo'lsangiz)
+*.sqlite3
+*.db
+
+# Log fayllar
+*.log
