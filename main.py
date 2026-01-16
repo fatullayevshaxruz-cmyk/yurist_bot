@@ -1,7 +1,3 @@
-import os
-from aiohttp import web
-import asyncio
-
 """
 🚗 AI AVTO-YURIST BOT
 =======================
@@ -29,7 +25,8 @@ Uzbekiston yo'l harakati qonunchiligi bo'yicha AI maslahatchi.
 - /add_money [user_id] [summa] - Foydalanuvchi balansini to'ldirish
 - /stats - Statistika ko'rish
 """
-
+import os
+from aiohttp import web
 import asyncio
 import logging
 import sqlite3
@@ -82,6 +79,8 @@ router = Router()
 
 async def handle(request):
     return web.Response(text="Bot is running!")
+
+
 async def start_webhook():
     app = web.Application()
     app.router.add_get("/", handle)
@@ -98,10 +97,6 @@ class PaymentStates(StatesGroup):
     """To'lov holatlari"""
     waiting_for_receipt = State()  # Chek kutilmoqda
 
-
-# 3. ENG OXIRIDA ESA DOIM SHU QOLADI
-if __name__ == "__main__":
-    asyncio.run(main())
 
 # ================= MA'LUMOTLAR BAZASI =================
 def init_db():
@@ -703,13 +698,31 @@ async def handle_photo(message: Message):
     """Umumiy rasm handler - to'lov cheki sifatida qabul qilish"""
     await process_receipt_photo(message)
 
-# 2. ASOSIY MAIN FUNKSIYASI
-async def main():
-    # SHU YERDA WEB SERVERNI ISHGA TUSHIRAMIZ
-    asyncio.create_task(start_webhook())
+# ================= KEEP-ALIVE MEXANIZMI =================
+
+async def keep_alive():
+    """
+    Botni uxlatmaslik uchun har 10 daqiqada o'zini ping qiladi.
+    Render bepul rejasida 15 daqiqadan keyin uxlab qoladi.
+    """
+    import aiohttp
     
-    print("🚀 Bot ishga tushdi!")
-    await dp.start_polling(bot)
+    # Render URL (avtomatik aniqlanadi)
+    render_url = os.environ.get("RENDER_EXTERNAL_URL")
+    
+    while True:
+        await asyncio.sleep(600)  # 10 daqiqa (600 soniya)
+        
+        if render_url:
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(f"{render_url}/") as response:
+                        logger.info(f"🔄 Keep-alive ping: {response.status}")
+            except Exception as e:
+                logger.warning(f"⚠️ Keep-alive xatolik: {e}")
+        else:
+            logger.info("🔄 Keep-alive: lokal rejim (ping o'tkazilmadi)")
+
 
 # ================= ASOSIY FUNKSIYA =================
 
@@ -723,6 +736,12 @@ async def main():
     
     # Router qo'shish (middleware yo'q - majburiy obuna olib tashlandi)
     dp.include_router(router)
+    
+    # Web serverni ishga tushirish (Render uchun)
+    asyncio.create_task(start_webhook())
+    
+    # Keep-alive mexanizmini ishga tushirish
+    asyncio.create_task(keep_alive())
     
     # Botni ishga tushirish
     logger.info("🚀 Bot ishga tushdi!")
