@@ -1,7 +1,8 @@
 """
-🚗 AI AVTO-YURIST BOT
+⚖️ AI YURIST BOT + RAG
 =======================
-Uzbekiston yo'l harakati qonunchiligi bo'yicha AI maslahatchi.
+O'zbekiston qonunchiligi bo'yicha AI maslahatchi.
+Lex.uz'dan qonunlarni avtomatik yuklab, RAG tizimi orqali aniq javoblar beradi.
 
 📋 ISHGA TUSHIRISH UCHUN:
 1. .env faylini yarating va quyidagi ma'lumotlarni kiriting:
@@ -12,7 +13,7 @@ Uzbekiston yo'l harakati qonunchiligi bo'yicha AI maslahatchi.
    CARD_NUMBER=to'lov_kartasi_raqami
 
 2. Kerakli kutubxonalarni o'rnating:
-   pip install aiogram openai python-dotenv aiohttp
+   pip install -r requirements.txt
 
 3. Botni ishga tushiring:
    python main.py
@@ -23,7 +24,10 @@ Uzbekiston yo'l harakati qonunchiligi bo'yicha AI maslahatchi.
 
 👨‍💼 ADMIN BUYRUQLARI:
 - /add_money [user_id] [summa] - Foydalanuvchi balansini to'ldirish
-- /stats - Statistika ko'rish
+- /stats - Bot statistikasi
+- /update_laws - Qonunlarni yangilash
+- /law_stats - Qonunlar statistikasi
+- /search_law [so'z] - Qonun qidirish
 """
 import os
 from aiohttp import web
@@ -46,16 +50,44 @@ from aiogram.types import (
     InlineKeyboardMarkup,
     CallbackQuery,
     ReplyKeyboardMarkup,
-    KeyboardButton
+    KeyboardButton,
+    BufferedInputFile
 )
+from auto_update_bot import AutoUpdateBot
+from monitoring_dashboard import LawMonitor
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
+
+# RAG tizimi importlari
+try:
+    from law_scraper import LawScraper
+    from rag_engine import get_rag_engine, RAGEngine
+    RAG_AVAILABLE = True
+except ImportError as e:
+    RAG_AVAILABLE = False
+    print(f"⚠️ RAG tizimi mavjud emas: {e}")
+
+# OpenAI Assistants API (1-usul - soddaroq)
+try:
+    from openai_assistant import get_assistant, OpenAIAssistant
+    ASSISTANT_AVAILABLE = True
+except ImportError as e:
+    ASSISTANT_AVAILABLE = False
+    print(f"⚠️ OpenAI Assistant mavjud emas: {e}")
+
+# Scheduler importi
+try:
+    from apscheduler.schedulers.asyncio import AsyncIOScheduler
+    SCHEDULER_AVAILABLE = True
+except ImportError:
+    SCHEDULER_AVAILABLE = False
 
 # ================= KONFIGURATSIYA =================
 load_dotenv()
 
 BOT_TOKEN = getenv("BOT_TOKEN")
 OPENAI_API_KEY = getenv("OPENAI_API_KEY")
+GOOGLE_API_KEY = getenv("GOOGLE_API_KEY")
 ADMIN_ID = int(getenv("ADMIN_ID", "0"))
 CHANNEL_ID = getenv("CHANNEL_ID")  # @kanal_username yoki -100xxxxxxxxx
 CARD_NUMBER = getenv("CARD_NUMBER", "8600 1234 5678 9012")
@@ -63,6 +95,9 @@ CARD_NUMBER = getenv("CARD_NUMBER", "8600 1234 5678 9012")
 # Narxlar (so'mda)
 PRICE_QUESTION = 5000  # Oddiy savol
 PRICE_ARIZA = 15000    # Ariza yozish
+
+# BHM (Bazaviy Hisoblash Miqdori) - jarimalarni hisoblash uchun
+BHM_VALUE = int(getenv("BHM_VALUE", "412500"))  # 2026-yil uchun 412,500 so'm
 
 # Logging sozlamalari
 logging.basicConfig(
@@ -96,6 +131,11 @@ async def start_webhook():
 class PaymentStates(StatesGroup):
     """To'lov holatlari"""
     waiting_for_receipt = State()  # Chek kutilmoqda
+
+class QuestionStates(StatesGroup):
+    """Savol va ariza holatlari"""
+    waiting_for_question = State()  # Savol matni kutilmoqda
+    waiting_for_ariza = State()    # Ariza tavsifi kutilmoqda
 
 
 # ================= MA'LUMOTLAR BAZASI =================
@@ -221,7 +261,7 @@ def get_main_keyboard() -> ReplyKeyboardMarkup:
         keyboard=[
             [KeyboardButton(text="📝 Savol berish"), KeyboardButton(text="📄 Ariza yozish")],
             [KeyboardButton(text="💰 Balansim"), KeyboardButton(text="💳 Hisobni to'ldirish")],
-            [KeyboardButton(text="ℹ️ Yordam")]
+            [KeyboardButton(text="🧾Tarifa kalkulyator"), KeyboardButton(text="ℹ️ Yordam")]
         ],
         resize_keyboard=True,
         is_persistent=True
@@ -239,47 +279,118 @@ def get_top_up_keyboard() -> ReplyKeyboardMarkup:
     )
 
 
-# ================= OPENAI FUNKSIYALARI =================
-async def get_ai_response(question: str, is_ariza: bool = False) -> str:
+# ================= BHM KALKULYATOR =================
+def format_bhm_amount(bhm_count: float) -> str:
+    """BHM ni so'mga aylantirish va formatlash"""
+    amount = bhm_count * BHM_VALUE
+    return f"{amount:,.0f}".replace(",", " ")
+
+
+def get_bhm_info() -> str:
+    """BHM haqida ma'lumot"""
+    return f"1 BHM = {BHM_VALUE:,} so'm".replace(",", " ")
+
+
+# ================= OPENAI VA RAG FUNKSIYALARI =================
+async def get_ai_response(question: str, user_id: int = 0, is_ariza: bool = False) -> str:
     """
-    OpenAI orqali javob olish.
-    is_ariza: True bo'lsa, ariza shabloni so'ralgan
+    Savolga javob olish.
+    1-usul: OpenAI Assistants API (File Search) - eng sodda va ishonchli
+    2-usul: RAG tizimi (LlamaIndex) - backup sifatida
+    BHM ni avtomatik so'mga aylantiradi.
     """
     
-    system_prompt = """Sen O'zbekiston Respublikasining Ma'muriy javobgarlik to'g'risidagi kodeksi (MJtK) bo'yicha mutaxassis yuristsanyu.
-
-ASOSIY QOIDALAR:
-1. Faqat O'zbekcha javob ber
-2. Tegishli moddalarni keltir (masalan: MJtK 128-modda)
-3. Qisqa va aniq javob ber
-4. Agar "ariza" yoki "shikoyat" so'ralsa, rasmiy shablon tayyorla
-
-ARIZA SHABLONI (agar so'ralsa):
-- Murojaat qiluvchining F.I.Sh va manzili
-- Qayerga murojaat (IIB, sud, prokuratura)
-- Voqea bayoni
-- Huquqiy asoslar (moddalar)
-- So'rov/talab
-- Sana va imzo joyi
-
-Har doim professional va hurmatli ohangda yoz."""
+    # 1-USUL: OpenAI Assistants API (tavsiya etiladi)
+    if ASSISTANT_AVAILABLE:
+        try:
+            assistant = get_assistant()
+            if assistant.is_initialized:
+                result = await assistant.query(user_id, question)
+                if result["success"]:
+                    # Agar "topmadim" desa, GPT-4o-mini promptiga o'tamiz
+                    answer = result["answer"]
+                    # Bir nechta variantlar va qisqa javoblarni tekshirish
+                    not_found_keywords = [
+                        "ma'lumot topmadim", "topilmadi", "not found", 
+                        "bazamda yo'q", "kechirasiz", "ma'lumot yo'q",
+                        "javob topa olmadim"
+                    ]
+                    
+                    is_not_found = any(kw in answer.lower() for kw in not_found_keywords)
+                    
+                    if is_not_found or len(answer) < 40:
+                        logger.info(f"⚠️ Assistant javobi qoniqarsiz (len={len(answer)}), zaxira modelga o'tkazildi: {answer[:60]}...")
+                    else:
+                        return answer
+        except Exception as e:
+            logger.warning(f"Assistant xatolik: {e}")
     
+    # RAG tizimidan kontekst olish
+    rag_context = ""
+    sources_text = ""
+    
+    if RAG_AVAILABLE:
+        try:
+            rag_engine = get_rag_engine()
+            if rag_engine.is_initialized and rag_engine.index:
+                result = await rag_engine.query(question, top_k=3)
+                if result["success"] and result["answer"]:
+                    rag_context = f"\n\nQONUNLARDAN MA'LUMOT:\n{result['answer']}"
+                    if result["sources"]:
+                        sources_text = "\n\n📚 Manbalar:\n"
+                        for src in result["sources"][:2]:
+                            sources_text += f"• {src['title'][:60]}...\n  🔗 {src['url']}\n"
+        except Exception as e:
+            logger.warning(f"RAG xatolik: {e}")
+    
+    system_prompt = f"""Sening isming "AI YHQ Maslahatchisi". Sen O'zbekiston Respublikasining Yo'l harakati qonun-qoidalari (YHQ) bo'yicha ixtisoslashgan professional maslahatchisan.
+
+SENING ASOSIY QOIDALARING:
+1. FAQAT YO'L HARAKATI QOIDALARI (YHQ): Javoblaringni faqat O'zbekiston Respublikasi Yo'l harakati qoidalariga (Lex.uz) asoslanib ber. Qoidalar, belgilar va chiziqlar haqida batafsil ma'lumot ber.
+2. TAQIQLANGAN MAVZULAR: Jarimalar miqdori, kodekslar yoki yo'l harakatiga aloqador bo'lmagan boshqa qonunlar haqida savol berilsa, "Men faqat yo'l harakati qonun-qoidalari (qoidalar, belgilar, chiziqlar) bo'yicha maslahat bera olaman" deb javob ber.
+3. ANIQLIK: YHQ bandlari raqamlarini, belgilar va chiziqlar nomlarini aniq ko'rsat.
+
+{rag_context if rag_context else ""}
+
+JAVOB STRUKTURASI:
+- 🚗 [Tegishli YHQ Bandi]: Qoida bandi raqami va mazmuni.
+- 🛑 [Belgi va Chiziqlar]: Agar savolga aloqador bo'lsa, tegishli belgilar.
+- 💡 [Maslahat]: Haydovchi ushbu qoidaga qanday rioya qilishi kerakligi haqida tavsiya.
+- ⚠️ [Ogohlantirish]: "Ushbu ma'lumot tanishib chiqish uchun berildi, yakuniy qaror uchun rasmiy YHQ kitobiga yoki huquqshunosga murojaat qiling."
+
+TIL:
+- Foydalanuvchi so'ragan tilda (O'zbek yoki Rus) javob ber. Professional va tushunarli tilda gapir."""
+    
+    # FINAL JAVOB: Google Gemini (OpenAI o'rniga)
     try:
-        response = await openai_client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": question}
-            ],
-            max_tokens=1500,
-            temperature=0.7
-        )
+        import google.generativeai as genai
+        genai.configure(api_key=GOOGLE_API_KEY)
+        model = genai.GenerativeModel('gemini-1.5-flash')
         
-        return response.choices[0].message.content
+        full_prompt = f"{system_prompt}\n\nFOYDALANUVCHI SAVOLI: {question}"
+        
+        response = model.generate_content(full_prompt)
+        answer = response.text
+        
+        return answer + sources_text
         
     except Exception as e:
-        logger.error(f"OpenAI xatolik: {e}")
-        return "⚠️ AI xizmatida xatolik yuz berdi. Iltimos, keyinroq urinib ko'ring."
+        logger.error(f"Gemini xatolik: {e}")
+        # Agar Gemini xato bersa, eski usulda (OpenAI) urinib ko'ramiz
+        try:
+            response = await openai_client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": question}
+                ],
+                max_tokens=1500,
+                temperature=0.5
+            )
+            return response.choices[0].message.content + sources_text
+        except Exception as oai_e:
+            logger.error(f"OpenAI fallback xatolik: {oai_e}")
+            return "⚠️ AI xizmatida xatolik yuz berdi. Iltimos, keyinroq urinib ko'ring."
 
 
 # ================= HANDLERS =================
@@ -307,7 +418,7 @@ async def cmd_start(message: Message):
 # ================= REPLY KEYBOARD HANDLERS =================
 
 @router.message(F.text == "📝 Savol berish")
-async def ask_question_start(message: Message):
+async def ask_question_start(message: Message, state: FSMContext):
     """Savol berish"""
     user = get_user(message.from_user.id)
     balance = user["balance"] if user else 0
@@ -322,17 +433,18 @@ async def ask_question_start(message: Message):
         )
         return
     
+    await state.set_state(QuestionStates.waiting_for_question)
     await message.answer(
         f"📝 <b>Savolingizni yozing</b>\n\n"
         f"💰 Narxi: {PRICE_QUESTION:,} so'm\n"
         f"💵 Balansingiz: {balance:,.0f} so'm\n\n"
         "⬇️ Savolingizni matn sifatida yuboring:",
-        reply_markup=get_main_keyboard()
+        reply_markup=get_top_up_keyboard()  # Orqaga tugmasi bor klaviatura
     )
 
 
 @router.message(F.text == "📄 Ariza yozish")
-async def write_ariza_start(message: Message):
+async def write_ariza_start(message: Message, state: FSMContext):
     """Ariza yozish"""
     user = get_user(message.from_user.id)
     balance = user["balance"] if user else 0
@@ -347,6 +459,7 @@ async def write_ariza_start(message: Message):
         )
         return
     
+    await state.set_state(QuestionStates.waiting_for_ariza)
     await message.answer(
         f"📄 <b>Ariza/Shikoyat yozish</b>\n\n"
         f"💰 Narxi: {PRICE_ARIZA:,} so'm\n"
@@ -356,7 +469,7 @@ async def write_ariza_start(message: Message):
         "• Qachon va qayerda?\n"
         "• Qanday hujjat kerak? (shikoyat, ariza)\n\n"
         "⬇️ Batafsil yozing:",
-        reply_markup=get_main_keyboard()
+        reply_markup=get_top_up_keyboard()
     )
 
 
@@ -404,8 +517,8 @@ async def go_back(message: Message, state: FSMContext):
 async def show_help(message: Message):
     """Yordam"""
     await message.answer(
-        "ℹ️ <b>AI Avto-Yurist Bot</b>\n\n"
-        "🚗 Bu bot O'zbekiston yo'l harakati qonunchiligi "
+        "ℹ️ <b>AI Yurist Bot</b>\n\n"
+        "⚖️ Bu bot O'zbekiston qonunchiligi "
         "bo'yicha huquqiy maslahat beradi.\n\n"
         "<b>📋 Xizmatlar:</b>\n"
         f"• 📝 Savol berish — {PRICE_QUESTION:,} so'm\n"
@@ -418,6 +531,86 @@ async def show_help(message: Message):
         "📞 <b>Muammo bo'lsa:</b> @admin_username",
         reply_markup=get_main_keyboard()
     )
+
+
+@router.message(F.text.startswith("🧾"))
+async def show_tariff_calculator(message: Message):
+    """Tarifa kalkulyator - barcha jarimalar ro'yxati"""
+    bhm = BHM_VALUE
+    
+    await message.answer(
+        f"🧾 <b>JARIMA KALKULYATOR</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"💰 <b>1 BHM = {bhm:,} so'm</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        
+        f"🚦 <b>SVETOFOR QOIDALARI:</b>\n"
+        f"• Qizil chiroqdan o'tish:\n"
+        f"  <code>2 BHM = {2*bhm:,} so'm</code>\n"
+        f"• Takroran (1 yil ichida):\n"
+        f"  <code>5 BHM = {5*bhm:,} so'm</code>\n\n"
+        
+        f"🚗 <b>TEZLIK UCHUN:</b>\n"
+        f"• 10-20 km/soat oshirish:\n"
+        f"  <code>1 BHM = {bhm:,} so'm</code>\n"
+        f"• 20-40 km/soat oshirish:\n"
+        f"  <code>2 BHM = {2*bhm:,} so'm</code>\n"
+        f"• 40+ km/soat oshirish:\n"
+        f"  <code>5 BHM = {5*bhm:,} so'm</code>\n\n"
+        
+        f"🔒 <b>BOSHQA JARIMALAR:</b>\n"
+        f"• Xavfsizlik kamari: <code>{bhm:,}</code>\n"
+        f"• Telefon bilan gaplashish: <code>{bhm:,}</code>\n"
+        f"• Mast haydash: <code>{10*bhm:,}</code>\n\n"
+        
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"💸 <b>CHEGIRMALAR:</b>\n"
+        f"• 15 kunda to'lash: <b>50%</b> chegirma\n"
+        f"• 30 kunda to'lash: <b>30%</b> chegirma\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        
+        f"📌 Aniq savol uchun '📝 Savol berish' tugmasini bosing.",
+        reply_markup=get_main_keyboard()
+    )
+
+
+@router.message(Command("reset"))
+async def cmd_reset_thread(message: Message):
+    """Userning suhbatini tozalash"""
+    if ASSISTANT_AVAILABLE:
+        assistant = get_assistant()
+        await assistant.reset_thread(message.from_user.id)
+    
+    await message.answer(
+        "🔄 <b>Suhbat tarixi tozalandi!</b>\n\n"
+        "Endi yangi savol berishingiz mumkin.",
+        reply_markup=get_main_keyboard()
+    )
+
+
+@router.message(Command("bhm"))
+async def cmd_bhm_calculator(message: Message, command: CommandObject):
+    """BHM kalkulyator buyrug'i"""
+    if command.args:
+        try:
+            bhm_count = float(command.args.replace(",", "."))
+            amount = bhm_count * BHM_VALUE
+            await message.answer(
+                f"🧮 <b>BHM Kalkulyator</b>\n\n"
+                f"📊 {bhm_count} BHM = <code>{amount:,.0f}</code> so'm\n\n"
+                f"💰 1 BHM = {BHM_VALUE:,} so'm",
+                reply_markup=get_main_keyboard()
+            )
+        except ValueError:
+            await message.answer(
+                "❌ Noto'g'ri format!\n\n"
+                "✅ To'g'ri: <code>/bhm 5</code>\n"
+                "Natija: 5 BHM = 2,062,500 so'm",
+                reply_markup=get_main_keyboard()
+            )
+    else:
+        # Kalkulyator jadvalini ko'rsatish
+        await show_tariff_calculator(message)
 
 
 # ================= PAYMENT HANDLERS =================
@@ -635,23 +828,40 @@ async def admin_stats(message: Message):
 
 # ================= MATN XABARLARI =================
 
+@router.message(QuestionStates.waiting_for_question)
+@router.message(QuestionStates.waiting_for_ariza)
 @router.message(F.text)
-async def handle_text(message: Message):
+async def handle_text(message: Message, state: FSMContext):
     """Matn xabarlarini qayta ishlash"""
-    user = get_user(message.from_user.id)
+    current_state = await state.get_state()
+    logger.info(f"📩 Yangi xabar: user={message.from_user.id}, state={current_state}, text='{message.text[:50]}'")
     
+    user = get_user(message.from_user.id)
     if not user:
         create_user(message.from_user.id, message.from_user.full_name, message.from_user.username or "")
         user = get_user(message.from_user.id)
     
-    text = message.text.lower()
+    text = message.text
     
-    # Ariza so'ralyaptimi?
-    is_ariza = any(word in text for word in ["ariza", "shikoyat", "da'vo", "murojaat", "template", "shablon"])
+    # Avtomatik aniqlash (holat bo'lmasa ham)
+    is_ariza_keyword = any(word in text.lower() for word in ["ariza", "shikoyat", "da'vo", "murojaat", "shablon", "template"])
+    is_question_likely = len(text) > 15 or any(word in text.lower() for word in ["jarima", "qonun", "mjtk", "modda", "qoida", "yol", "sud", "ment", "gai", "prava"])
     
+    if not current_state:
+        if message.text in ["📝 Savol berish", "📄 Ariza yozish", "💰 Balansim", "💳 Hisobni to'ldirish", "ℹ️ Yordam", "🔙 Orqaga"] or message.text.startswith("🧾"):
+            return
+            
+        if not is_question_likely and not is_ariza_keyword:
+            await message.answer(
+                "💡 Savol berish yoki ariza yozish uchun quyidagi tugmalardan birini bosing:",
+                reply_markup=get_main_keyboard()
+            )
+            return
+
+    is_ariza = current_state == QuestionStates.waiting_for_ariza or (not current_state and is_ariza_keyword)
     price = PRICE_ARIZA if is_ariza else PRICE_QUESTION
     
-    # Balans tekshiruvi
+    # Balans tekshiruvi (yana bir bor)
     if user["balance"] < price:
         await message.answer(
             f"❌ <b>Mablag' yetarli emas!</b>\n\n"
@@ -660,17 +870,24 @@ async def handle_text(message: Message):
             "Iltimos, hisobingizni to'ldiring.",
             reply_markup=get_main_keyboard()
         )
+        await state.clear()
         return
-    
-    # Pul yechish
-    update_balance(message.from_user.id, price, "expense")
     
     # AI javobini olish
     waiting_msg = await message.answer("⏳ Javob tayyorlanmoqda...")
     
-    response = await get_ai_response(message.text, is_ariza)
+    response = await get_ai_response(text, message.from_user.id, is_ariza)
     
     await waiting_msg.delete()
+    
+    # Agar xatolik bo'lsa, pul yechmaymiz
+    if response.startswith("⚠️"):
+        await message.answer(response, reply_markup=get_main_keyboard())
+        await state.clear()
+        return
+
+    # Muvaffaqiyatli bo'lsagina pul yechish
+    update_balance(message.from_user.id, price, "expense")
     
     new_balance = user["balance"] - price
     
@@ -681,6 +898,7 @@ async def handle_text(message: Message):
         f"💰 Qoldiq: {new_balance:,.0f} so'm",
         reply_markup=get_main_keyboard()
     )
+    await state.clear()
 
 
 @router.message(F.voice)
@@ -724,6 +942,334 @@ async def keep_alive():
             logger.info("🔄 Keep-alive: lokal rejim (ping o'tkazilmadi)")
 
 
+# ================= RAG BUYRUQLARI =================
+
+@router.message(Command("update_laws"))
+async def cmd_update_laws(message: Message):
+    """Admin: Qonunlarni yangilash"""
+    if message.from_user.id != ADMIN_ID:
+        await message.answer("⛔️ Bu buyruq faqat admin uchun!")
+        return
+    
+    if not RAG_AVAILABLE:
+        await message.answer("⚠️ RAG tizimi mavjud emas. Kutubxonalarni o'rnating.")
+        return
+    
+    status_msg = await message.answer("⏳ Qonunlar yuklanmoqda...")
+    
+    try:
+        # Qonunlarni yuklash
+        scraper = LawScraper()
+        new_laws = await scraper.check_for_updates()
+        
+        await status_msg.edit_text(f"📥 {len(new_laws)} ta yangi qonun yuklandi.\n⏳ Indekslanmoqda...")
+        
+        # RAG ga yuklash
+        rag_engine = get_rag_engine()
+        docs = rag_engine.load_documents_from_files()
+        if docs:
+            rag_engine.index_documents(docs)
+        
+        stats = rag_engine.get_stats()
+        await status_msg.edit_text(
+            f"✅ <b>Yangilash tugadi!</b>\n\n"
+            f"📥 Yangi qonunlar: {len(new_laws)} ta\n"
+            f"📚 Jami chunks: {stats.get('total_chunks', 0)} ta"
+        )
+    except Exception as e:
+        logger.error(f"Yangilash xatolik: {e}")
+        await status_msg.edit_text(f"❌ Xatolik: {str(e)[:100]}")
+
+
+@router.message(Command("search_law"))
+async def cmd_search_law(message: Message, command: CommandObject):
+    """Qonun qidirish"""
+    if not command.args:
+        await message.answer(
+            "🔍 <b>Qonun qidirish</b>\n\n"
+            "Foydalanish: <code>/search_law [kalit so'z]</code>\n"
+            "Misol: <code>/search_law yo'l harakati</code>"
+        )
+        return
+    
+    if not RAG_AVAILABLE:
+        await message.answer("⚠️ RAG tizimi mavjud emas.")
+        return
+    
+    keyword = command.args
+    rag_engine = get_rag_engine()
+    
+    if not rag_engine.is_initialized:
+        await message.answer("⚠️ Qonunlar hali yuklanmagan. Admin /update_laws buyrug'ini ishlatishi kerak.")
+        return
+    
+    results = rag_engine.search_laws(keyword, limit=5)
+    
+    if not results:
+        await message.answer(f"❌ '{keyword}' bo'yicha hech narsa topilmadi.")
+        return
+    
+    response = f"🔍 <b>'{keyword}' bo'yicha natijalar:</b>\n\n"
+    for i, r in enumerate(results[:5], 1):
+        title = r['title'][:60] + "..." if len(r['title']) > 60 else r['title']
+        response += f"{i}. <b>{title}</b>\n"
+        if r.get('url'):
+            response += f"   🔗 {r['url']}\n"
+        response += "\n"
+    
+    await message.answer(response, disable_web_page_preview=True)
+
+
+@router.message(Command("law_stats"))
+async def cmd_law_stats(message: Message):
+    """Qonunlar statistikasi"""
+    if not RAG_AVAILABLE:
+        await message.answer("⚠️ RAG tizimi mavjud emas.")
+        return
+    
+    rag_engine = get_rag_engine()
+    rag_stats = rag_engine.get_stats()
+    
+    scraper = LawScraper()
+    scraper_stats = scraper.get_stats()
+    
+    last_update = scraper_stats.get('last_update')
+    last_update_text = last_update[:10] if last_update else "Hali bo'lmagan"
+    
+    await message.answer(
+        "📊 <b>QONUNLAR STATISTIKASI</b>\n\n"
+        f"📚 Jami qonunlar: <code>{scraper_stats.get('total_laws', 0)}</code>\n"
+        f"📂 Kategoriyalar: <code>{scraper_stats.get('categories', 0)}</code>\n"
+        f"🧠 RAG chunks: <code>{rag_stats.get('total_chunks', 0)}</code>\n"
+        f"📅 Oxirgi yangilanish: {last_update_text}\n\n"
+        f"🤖 Embedding: {rag_stats.get('embedding_model', 'N/A')}\n"
+        f"🧠 LLM: {rag_stats.get('llm_model', 'N/A')}"
+    )
+
+
+@router.message(Command("update_mjtk"))
+async def cmd_update_mjtk(message: Message):
+    """Admin: MJtK (Ma'muriy javobgarlik kodeksi) ni yuklash"""
+    if message.from_user.id != ADMIN_ID:
+        await message.answer("⛔️ Bu buyruq faqat admin uchun!")
+        return
+    
+    if not RAG_AVAILABLE:
+        await message.answer("⚠️ RAG tizimi mavjud emas. Kutubxonalarni o'rnating.")
+        return
+    
+    status_msg = await message.answer("📚 MJtK yuklanmoqda...")
+    
+    try:
+        # MJtK ni yuklash
+        scraper = LawScraper()
+        result = await scraper.download_mjtk()
+        
+        await status_msg.edit_text(f"📥 {result['downloaded']} ta MJtK hujjati yuklandi.\n⏳ Indekslanmoqda...")
+        
+        # RAG ga yuklash
+        rag_engine = get_rag_engine()
+        docs = rag_engine.load_documents_from_files()
+        if docs:
+            rag_engine.index_documents(docs)
+        
+        stats = rag_engine.get_stats()
+        await status_msg.edit_text(
+            f"✅ <b>MJtK yuklandi!</b>\n\n"
+            f"📥 Yuklangan: {result['downloaded']} ta hujjat\n"
+            f"📚 Jami chunks: {stats.get('total_chunks', 0)} ta\n\n"
+            f"💡 Endi botga MJtK moddalarini so'rashingiz mumkin."
+        )
+    except Exception as e:
+        logger.error(f"MJtK yuklash xatolik: {e}")
+        await status_msg.edit_text(f"❌ Xatolik: {str(e)[:100]}")
+
+
+@router.message(Command("setup_assistant"))
+async def cmd_setup_assistant(message: Message):
+    """
+    Admin: OpenAI Assistant yaratish (1-usul).
+    Bu buyruq faqat bir marta ishlatiladi.
+    """
+    if message.from_user.id != ADMIN_ID:
+        await message.answer("⛔️ Bu buyruq faqat admin uchun!")
+        return
+    
+    if not ASSISTANT_AVAILABLE:
+        await message.answer("⚠️ OpenAI Assistant moduli mavjud emas.")
+        return
+    
+@router.message(Command("update_assistant"))
+async def cmd_update_assistant(message: Message):
+    """Admin: OpenAI Assistant instruktsiyalarini yangilash"""
+    if message.from_user.id != ADMIN_ID:
+        await message.answer("⛔️ Bu buyruq faqat admin uchun!")
+        return
+    
+    if not ASSISTANT_AVAILABLE:
+        await message.answer("⚠️ OpenAI Assistant moduli mavjud emas.")
+        return
+        
+    status_msg = await message.answer("🔄 Assistant yangilanmoqda...")
+    
+    try:
+        assistant = get_assistant()
+        success = await assistant.update_assistant_instructions()
+        
+        if success:
+            await status_msg.edit_text("✅ <b>Assistant instruktsiyalari yangilandi!</b>\n\nEndi u umumiy jarimalarni biladi.")
+        else:
+            await status_msg.edit_text("❌ Yangilashda xatolik yuz berdi. Assistant ID .env da borligini tekshiring.")
+            
+    except Exception as e:
+        logger.error(f"Assistant yangilashda xatolik: {e}")
+        await status_msg.edit_text(f"❌ Xatolik: {str(e)[:100]}")
+
+
+@router.message(Command("law_version"))
+async def cmd_law_version(message: Message, command: CommandObject):
+    """Qonun versiyasini tekshirish"""
+    if not command.args:
+        await message.answer(
+            "🔍 <b>Qonun versiyasini tekshirish</b>\n\n"
+            "Foydalanish: <code>/law_version [qonun_id]</code>\n"
+            "Misol: <code>/law_version 97661</code>"
+        )
+        return
+    
+    law_id = command.args.strip()
+    updater = AutoUpdateBot()
+    result = updater.get_law_with_verification(law_id)
+    
+    if result["success"]:
+        data = result["data"]
+        version_info = result["version_info"]
+        await message.answer(
+            f"📄 <b>{data.get('title', 'Qonun')}</b>\n"
+            f"🆔 ID: <code>{law_id}</code>\n"
+            f"📊 Versiya: <b>{version_info['version']}</b>\n"
+            f"📅 Yangilandi: {version_info['last_verified'][:10]}\n"
+            f"🔗 Manba: {data.get('url', '')}"
+        )
+    else:
+        await message.answer(f"❌ Qonun topilmadi: {law_id}")
+
+@router.message(Command("force_update"))
+async def cmd_force_update(message: Message):
+    """Majburiy yangilash (admin)"""
+    if message.from_user.id != ADMIN_ID: return
+    
+    status_msg = await message.answer("🔄 Yangilanmoqda...")
+    try:
+        rag = get_rag_engine() if RAG_AVAILABLE else None
+        updater = AutoUpdateBot(bot=message.bot, admin_id=ADMIN_ID, rag_engine=rag)
+        updates = await updater.scraper.monitor_priority_laws()
+        await updater.update_rag_system(updates)
+        await status_msg.edit_text(f"✅ Yangilash tugadi. {len(updates)} ta yangilanish.")
+    except Exception as e:
+        await status_msg.edit_text(f"❌ Xatolik: {e}")
+
+@router.message(Command("monitor"))
+async def cmd_monitor(message: Message):
+    """Monitoring hisoboti (admin)"""
+    if message.from_user.id != ADMIN_ID: return
+    
+    monitor = LawMonitor()
+    img = monitor.generate_report_image()
+    if img:
+        await message.answer_photo(
+            photo=BufferedInputFile(img.read(), filename="monitor.png"),
+            caption="📊 <b>Monitoring hisoboti</b>"
+        )
+    else:
+        await message.answer("📊 Ma'lumotlar etarli emas.")
+
+async def start_background_tasks(bot, rag_engine):
+    """Fon vazifalarini ishga tushirish"""
+    updater = AutoUpdateBot(bot=bot, admin_id=ADMIN_ID, rag_engine=rag_engine)
+    asyncio.create_task(updater.start_auto_update())
+    
+    # Monitoring uchun periodik checkpoint
+    async def monitoring_loop():
+        monitor = LawMonitor()
+        while True:
+            try:
+                # Statistikani qo'shish
+                monitor.add_checkpoint(0, len(updater.scraper.metadata.get("laws", {})))
+            except: pass
+            await asyncio.sleep(86400) # 24 soat
+            
+    asyncio.create_task(monitoring_loop())
+
+
+# ================= SCHEDULED TASKS =================
+
+async def scheduled_law_update():
+    """Har kuni avtomatik qonunlarni yangilash"""
+    if not RAG_AVAILABLE:
+        return
+    
+    logger.info("📅 Rejali qonun yangilanishi boshlanmoqda...")
+    
+    try:
+        scraper = LawScraper()
+        new_laws = await scraper.check_for_updates()
+        
+        if new_laws:
+            rag_engine = get_rag_engine()
+            docs = rag_engine.load_documents_from_files()
+            if docs:
+                rag_engine.index_documents(docs)
+            
+            # Adminga xabar
+            try:
+                await bot.send_message(
+                    ADMIN_ID,
+                    f"📅 <b>Avtomatik yangilanish</b>\n\n"
+                    f"✅ {len(new_laws)} ta yangi qonun yuklandi va indekslandi."
+                )
+            except:
+                pass
+        
+        logger.info(f"✅ Rejali yangilanish tugadi: {len(new_laws)} ta yangi qonun")
+    except Exception as e:
+        logger.error(f"Rejali yangilanish xatolik: {e}")
+
+
+async def startup_law_update():
+    """Bot ishga tushganda qonunlarni yuklash"""
+    if not RAG_AVAILABLE:
+        return
+    
+    logger.info("📥 Boshlang'ich qonun yuklash boshlanmoqda...")
+    
+    try:
+        # Qonunlarni yuklash
+        scraper = LawScraper()
+        new_laws = await scraper.check_for_updates()
+        
+        # RAG ga yuklash
+        rag_engine = get_rag_engine()
+        docs = rag_engine.load_documents_from_files()
+        if docs:
+            rag_engine.index_documents(docs)
+            logger.info(f"✅ {len(docs)} ta qonun indekslandi")
+        
+        # Adminga xabar
+        try:
+            await bot.send_message(
+                ADMIN_ID,
+                f"🚀 <b>Bot ishga tushdi!</b>\n\n"
+                f"📥 Yuklangan qonunlar: {len(new_laws)} ta\n"
+                f"📚 Indekslangan hujjatlar: {len(docs) if docs else 0} ta"
+            )
+        except:
+            pass
+        
+    except Exception as e:
+        logger.error(f"Boshlang'ich yuklash xatolik: {e}")
+
+
 # ================= ASOSIY FUNKSIYA =================
 
 async def main():
@@ -734,7 +1280,7 @@ async def main():
     # Dispatcher yaratish
     dp = Dispatcher()
     
-    # Router qo'shish (middleware yo'q - majburiy obuna olib tashlandi)
+    # Router qo'shish
     dp.include_router(router)
     
     # Web serverni ishga tushirish (Render uchun)
@@ -742,6 +1288,37 @@ async def main():
     
     # Keep-alive mexanizmini ishga tushirish
     asyncio.create_task(keep_alive())
+    
+    # Scheduler ishga tushirish (har 24 soatda qonunlarni yangilash)
+    if SCHEDULER_AVAILABLE:
+        scheduler = AsyncIOScheduler()
+        scheduler.add_job(
+            scheduled_law_update,
+            'interval',
+            hours=int(getenv("LAW_UPDATE_INTERVAL_HOURS", "24")),
+            id='law_update_job'
+        )
+        scheduler.start()
+        logger.info("📅 Scheduler ishga tushdi (har 24 soatda yangilanadi)")
+    
+    # RAG tizimini ishga tushirish va boshlang'ich yangilanish
+    if RAG_AVAILABLE:
+        try:
+            rag_engine = get_rag_engine()
+            logger.info(f"🧠 RAG tizimi: {'✅ tayyor' if rag_engine.is_initialized else '⚠️ ishga tushmadi'}")
+            
+            # Agar indeks bo'sh bo'lsa, avtomatik yuklash
+            if rag_engine.is_initialized:
+                stats = rag_engine.get_stats()
+                if stats.get('total_chunks', 0) == 0:
+                    logger.info("📥 Qonunlar yuklanmoqda (birinchi ishga tushirish)...")
+                    asyncio.create_task(startup_law_update())
+        except Exception as e:
+            logger.warning(f"RAG ishga tushirishda xatolik: {e}")
+    
+    # Fon vazifalarini boshlash
+    rag = get_rag_engine() if RAG_AVAILABLE else None
+    await start_background_tasks(bot, rag)
     
     # Botni ishga tushirish
     logger.info("🚀 Bot ishga tushdi!")

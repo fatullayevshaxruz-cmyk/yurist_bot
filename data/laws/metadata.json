@@ -1,0 +1,127 @@
+{
+  "last_update": null,
+  "total_laws": 0,
+  "categories": {},
+  "laws": {
+    "7998723": {
+      "title": "Noma'lum",
+      "category": "recent",
+      "file": "data/laws/recent/7998723.json",
+      "updated_at": "2026-01-18T01:18:31.997403"
+    },
+    "7998570": {
+      "title": "Noma'lum",
+      "category": "recent",
+      "file": "data/laws/recent/7998570.json",
+      "updated_at": "2026-01-18T01:18:32.626555"
+    },
+    "7997384": {
+      "title": "Noma'lum",
+      "category": "recent",
+      "file": "data/laws/recent/7997384.json",
+      "updated_at": "2026-01-18T01:18:33.249884"
+    },
+    "7996762": {
+      "title": "Noma'lum",
+      "category": "recent",
+      "file": "data/laws/recent/7996762.json",
+      "updated_at": "2026-01-18T01:18:33.875645"
+    },
+    "7996018": {
+      "title": "Noma'lum",
+      "category": "recent",
+      "file": "data/laws/recent/7996018.json",
+      "updated_at": "2026-01-18T01:18:34.516058"
+    },
+    "7995971": {
+      "title": "Noma'lum",
+      "category": "recent",
+      "file": "data/laws/recent/7995971.json",
+      "updated_at": "2026-01-18T01:18:35.147925"
+    },
+    "7987564": {
+      "title": "Noma'lum",
+      "category": "recent",
+      "file": "data/laws/recent/7987564.json",
+      "updated_at": "2026-01-18T01:18:35.829737"
+    },
+    "7990015": {
+      "title": "Noma'lum",
+      "category": "recent",
+      "file": "data/laws/recent/7990015.json",
+      "updated_at": "2026-01-18T01:18:36.480861"
+    },
+    "7992815": {
+      "title": "Noma'lum",
+      "category": "recent",
+      "file": "data/laws/recent/7992815.json",
+      "updated_at": "2026-01-18T01:18:37.092210"
+    },
+    "7992788": {
+      "title": "Noma'lum",
+      "category": "recent",
+      "file": "data/laws/recent/7992788.json",
+      "updated_at": "2026-01-18T01:18:37.708997"
+    },
+    "7987076": {
+      "title": "Noma'lum",
+      "category": "recent",
+      "file": "data/laws/recent/7987076.json",
+      "updated_at": "2026-01-18T01:18:38.736354"
+    },
+    "7994710": {
+      "title": "Noma'lum",
+      "category": "recent",
+      "file": "data/laws/recent/7994710.json",
+      "updated_at": "2026-01-18T01:18:39.374452"
+    },
+    "7993928": {
+      "title": "Noma'lum",
+      "category": "recent",
+      "file": "data/laws/recent/7993928.json",
+      "updated_at": "2026-01-18T01:18:39.996577"
+    },
+    "7992755": {
+      "title": "Noma'lum",
+      "category": "recent",
+      "file": "data/laws/recent/7992755.json",
+      "updated_at": "2026-01-18T01:18:40.924854"
+    },
+    "7987853": {
+      "title": "Noma'lum",
+      "category": "recent",
+      "file": "data/laws/recent/7987853.json",
+      "updated_at": "2026-01-18T01:18:41.566666"
+    },
+    "7985957": {
+      "title": "Noma'lum",
+      "category": "recent",
+      "file": "data/laws/recent/7985957.json",
+      "updated_at": "2026-01-18T01:18:42.209644"
+    },
+    "7985737": {
+      "title": "Noma'lum",
+      "category": "recent",
+      "file": "data/laws/recent/7985737.json",
+      "updated_at": "2026-01-18T01:18:43.584252"
+    },
+    "7984693": {
+      "title": "Noma'lum",
+      "category": "recent",
+      "file": "data/laws/recent/7984693.json",
+      "updated_at": "2026-01-18T01:18:44.300174"
+    },
+    "7990021": {
+      "title": "Noma'lum",
+      "category": "recent",
+      "file": "data/laws/recent/7990021.json",
+      "updated_at": "2026-01-18T01:18:44.932883"
+    },
+    "7985236": {
+      "title": "Noma'lum",
+      "category": "recent",
+      "file": "data/laws/recent/7985236.json",
+      "updated_at": "2026-01-18T01:18:45.648347"
+    }
+  }
+}

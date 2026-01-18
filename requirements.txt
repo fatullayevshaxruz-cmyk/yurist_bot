@@ -2,3 +2,22 @@ aiogram>=3.3.0
 openai>=1.0.0
 python-dotenv>=1.0.0
 aiohttp>=3.9.0
+# LlamaIndex (RAG tizimi uchun) - 2026 yangilangan versiyalar
+llama-index>=0.14.0
+llama-index-core>=0.14.0
+# Vektor bazasi
+chromadb>=0.4.0
+# Web scraping
+beautifulsoup4>=4.12.0
+lxml>=5.0.0
+httpx>=0.26.0
+# Scheduler (avtomatik yangilash uchun)
+apscheduler>=3.10.0
+matplotlib>=3.8.0
+pandas>=2.1.0
+# Gemini & PDF Support
+google-generativeai>=0.4.0
+pdfplumber>=0.10.0
+llama-index-llms-gemini>=0.1.0
+llama-index-embeddings-gemini>=0.1.0
+langchain>=0.1.0
